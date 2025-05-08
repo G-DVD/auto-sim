@@ -1,52 +1,30 @@
-# Prerequisites
-*.d
+# Build output
+Debug/
+Release/
 
-# Object files
+# IDE/Eclipse metadata
+.metadata/
+.settings/
+*.launch
+
+# Compiled files
 *.o
-*.ko
-*.obj
+*.d
 *.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
+*.bin
 *.hex
+*.map
+*.list
+*.log
+*.dep
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+# CubeIDE project backups and temp files
+*.bak
+*.tmp
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+# Optional: CubeMX generated folders (ha nem akarod verziózni)
+# Drivers/
+# Middlewares/
+
+# Egyéb, ha előfordul:
+*.swp
