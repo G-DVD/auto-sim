@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <stdatomic.h> // Include atomic support for volatile values
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,6 +54,7 @@ typedef struct {
 #define MESSAGE_TYPE_POSITION 0x01
 #define MESSAGE_TYPE_VELOCITY 0x02
 #define MESSAGE_TYPE_ANGLE 0x03
+#define MESSAGE_TYPE_RESPONSE 0x04
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -64,7 +66,9 @@ TIM_HandleTypeDef htim2;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
+volatile atomic_uint_least8_t system_state = 1; // 0: STOP, 1: START
+volatile uint8_t uart_rx_buffer[32];
+volatile uint8_t uart_rx_index = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -80,13 +84,57 @@ static void MX_USART2_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+// | Header (0xA55A) | Packet Length | 0x04 (Type) | Data Length | Timestamp | "START_OK"/"STOP_OK" | CRC |
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if (huart == &huart2)
-	{
+    if(huart == &huart2)
+    {
+        // New character
+        uint8_t received_char = uart_rx_buffer[uart_rx_index];
 
-	}
+        if(received_char == '\r') // End char
+        {
+            // Buffer end
+            uart_rx_buffer[uart_rx_index] = '\0'; // String end
+
+            if(strstr((char*)uart_rx_buffer, "START") != NULL) {
+				atomic_store(&system_state, 1);
+
+				// Send response
+				const char *response = "START_OK";
+				create_packet_and_send(MESSAGE_TYPE_RESPONSE, response, strlen(response));
+			}
+			else if(strstr((char*)uart_rx_buffer, "STOP") != NULL) {
+				atomic_store(&system_state, 0);
+
+				// Send response
+				const char *response = "STOP_OK";
+				create_packet_and_send(MESSAGE_TYPE_RESPONSE, response, strlen(response));
+			}
+
+            uart_rx_index = 0; // Reset buffer index
+            memset((void*)uart_rx_buffer, 0, sizeof(uart_rx_buffer)); // Reset buffer
+        }
+        else
+        {
+            if(uart_rx_index < sizeof(uart_rx_buffer)-1)
+            {
+                uart_rx_index++;
+            }
+            else
+            {
+                // Buffer overflow, reset
+                uart_rx_index = 0;
+            }
+        }
+
+        // Receive next
+        HAL_UART_Receive_IT(&huart2, (uint8_t*)&uart_rx_buffer[uart_rx_index], 1);
+    }
 }
+
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
@@ -95,19 +143,99 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 		// Transmission completed
 	}
 }
+#define NODE_COUNT (sizeof(nodes)/sizeof(nodes[0]))
+#define PATH_LENGTH 8
+
+// List of points
+const char nodes[] = {'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R', 'S'};
+// Node order in nodes[]: A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S
+// Index:                0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18
+
+#define NO_NEIGHBOR 255
+
+const uint8_t neighbors[19][5] = {
+    /* A */ { 1, 2, 3, NO_NEIGHBOR, NO_NEIGHBOR },          // B, C, D
+    /* B */ { 0, 3, 4, NO_NEIGHBOR, NO_NEIGHBOR },          // A, D, E
+    /* C */ { 0, 5, 7, NO_NEIGHBOR, NO_NEIGHBOR },			// A, F, H
+    /* D */ { 0, 1, 5, 6, 8 },          					// A, B, F, I, G
+    /* E */ { 1, 6, 9, NO_NEIGHBOR, NO_NEIGHBOR },          // B, G, J
+    /* F */ { 2, 3, 7, 8, 6 },                    			// C, D, H, I, G
+    /* G */ { 5, 3, 4, 9, 8 },                   			// F, D, E, J, I
+    /* H */ { 2, 12, 5, 10, NO_NEIGHBOR },                  // C, M, F, K
+    /* I */ { 3, 5, 6, 10, 11 },                            // D, F, G, K, L
+    /* J */ { 4, 11, 14, 6, NO_NEIGHBOR },        			// E, L, O, G
+    /* K */ { 7, 8, 12, 13, 11 },                  			// H, I, M, N, L
+    /* L */ { 10, 8, 9, 13, 14 },                   		// K, I, J, N, O
+    /* M */ { 7, 10, 16, 15, NO_NEIGHBOR },        			// H, K, Q, P
+    /* N */ { 10, 11, 16, 17, 8 },                			// K, L, Q, R, I
+    /* O */ { 9, 17, 18, 11, NO_NEIGHBOR },        			// J, R, S, L
+    /* P */ { 16, 12, NO_NEIGHBOR, NO_NEIGHBOR, NO_NEIGHBOR }, // Q, M
+    /* Q */ { 12, 13, 15, 17, NO_NEIGHBOR },       			// M, N, P, R
+    /* R */ { 13, 14, 18, 16, NO_NEIGHBOR },       			// N, O, S, Q
+    /* S */ { 14, 17, NO_NEIGHBOR, NO_NEIGHBOR, NO_NEIGHBOR }, // O, R
+};
+
+// Path (indexes in node array)
+uint8_t current_node = 18; // e.g., start at 'S'
+uint8_t prev_node = 18;    // initialize to same as current_node
+uint8_t next_node;
+uint8_t progress = 0;
+
+// Returns a random neighbor of `node`, excluding `prev_node` if possible.
+// If there are no other neighbors, returns prev_node (so you "bounce back").
+uint8_t get_random_neighbor(uint8_t node, uint8_t prev_node) {
+    uint8_t possible[5];
+    uint8_t count = 0;
+    // Collect all valid neighbors except prev_node
+    for (uint8_t i = 0; i < 5; ++i) {
+        uint8_t n = neighbors[node][i];
+        if (n != NO_NEIGHBOR && n != prev_node) {
+            possible[count++] = n;
+        }
+    }
+    if (count == 0) {
+        // Only possible move is to go back to prev_node
+        return prev_node;
+    }
+    // Pick a random neighbor from the possible ones
+    return possible[rand() % count];
+}
+
+
+float random_float(float min, float max)
+{
+	return min + ((float)rand() / (float)RAND_MAX) * (max - min);
+}
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	if (htim->Instance == TIM2)
+	// Send command only in START mode system_sate = 1
+	if (htim->Instance == TIM2 && system_state)
 	{
 		// 100 ms passed
-		Position pos = {'A', 'B', 24};
+		if (progress >= 100)
+		{
+			progress = 0;
+			// Move to next node
+			prev_node = current_node;
+			current_node = next_node;
+			next_node = get_random_neighbor(current_node, prev_node);
+		}
+
+		Position pos;
+		pos.prev_node = nodes[current_node];
+		pos.next_node = nodes[next_node];
+		pos.progress = progress++;
 		create_packet_and_send(MESSAGE_TYPE_POSITION, &pos, sizeof(Position));
 
-		VelocityController vc = {50.0f, 10.0f};
+		VelocityController vc;
+		vc.velocity = 50.0f;
+		vc.output = random_float(vc.velocity - 10.0f, vc.velocity + 10.0f);
 		create_packet_and_send(MESSAGE_TYPE_VELOCITY, &vc, sizeof(VelocityController));
 
-		AngleController ac = {30.0f, 5.0f};
+		AngleController ac;
+		ac.angle = 30.0f;
+		ac.output = random_float(ac.angle - 10.0f, ac.angle + 10.0f);
 		create_packet_and_send(MESSAGE_TYPE_ANGLE, &ac, sizeof(AngleController));
 	}
 }
@@ -174,7 +302,7 @@ void create_packet_and_send(uint8_t data_type, const void* data, uint16_t data_l
 	packet[offset++] = (crc >> 8) & 0xFF;
 
 	// Send to UART
-	transmit_UART_message(&packet, packet_length);
+	transmit_UART_message(packet, packet_length);
 }
 
 /* USER CODE END 0 */
@@ -195,7 +323,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  next_node = get_random_neighbor(current_node, prev_node);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -215,6 +343,8 @@ int main(void)
   HAL_NVIC_SetPriority(TIM2_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(TIM2_IRQn);
   HAL_TIM_Base_Start_IT(&htim2);
+  // Start first receive
+  HAL_UART_Receive_IT(&huart2, (uint8_t*)&uart_rx_buffer[0], 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -367,9 +497,9 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 999;
+  htim2.Init.Prescaler = 999; // 999 - 100 ms
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 1599;
+  htim2.Init.Period = 1599; // 1599 . 100 ms
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
