@@ -54,6 +54,7 @@ typedef struct {
 #define MESSAGE_TYPE_POSITION 0x01
 #define MESSAGE_TYPE_VELOCITY 0x02
 #define MESSAGE_TYPE_ANGLE 0x03
+#define MESSAGE_TYPE_RESPONSE 0x04
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -65,7 +66,9 @@ TIM_HandleTypeDef htim2;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
+volatile atomic_uint_least8_t system_state = 1; // 0: STOP, 1: START
+volatile uint8_t uart_rx_buffer[32];
+volatile uint8_t uart_rx_index = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -81,13 +84,57 @@ static void MX_USART2_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+// | Header (0xA55A) | Packet Length | 0x04 (Type) | Data Length | Timestamp | "START_OK"/"STOP_OK" | CRC |
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if (huart == &huart2)
-	{
+    if(huart == &huart2)
+    {
+        // New character
+        uint8_t received_char = uart_rx_buffer[uart_rx_index];
 
-	}
+        if(received_char == '\r') // End char
+        {
+            // Buffer end
+            uart_rx_buffer[uart_rx_index] = '\0'; // String end
+
+            if(strstr((char*)uart_rx_buffer, "START") != NULL) {
+				atomic_store(&system_state, 1);
+
+				// Send response
+				const char *response = "START_OK";
+				create_packet_and_send(MESSAGE_TYPE_RESPONSE, response, strlen(response));
+			}
+			else if(strstr((char*)uart_rx_buffer, "STOP") != NULL) {
+				atomic_store(&system_state, 0);
+
+				// Send response
+				const char *response = "STOP_OK";
+				create_packet_and_send(MESSAGE_TYPE_RESPONSE, response, strlen(response));
+			}
+
+            uart_rx_index = 0; // Reset buffer index
+            memset((void*)uart_rx_buffer, 0, sizeof(uart_rx_buffer)); // Reset buffer
+        }
+        else
+        {
+            if(uart_rx_index < sizeof(uart_rx_buffer)-1)
+            {
+                uart_rx_index++;
+            }
+            else
+            {
+                // Buffer overflow, reset
+                uart_rx_index = 0;
+            }
+        }
+
+        // Receive next
+        HAL_UART_Receive_IT(&huart2, (uint8_t*)&uart_rx_buffer[uart_rx_index], 1);
+    }
 }
+
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
@@ -162,7 +209,8 @@ float random_float(float min, float max)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	if (htim->Instance == TIM2)
+	// Send command only in START mode system_sate = 1
+	if (htim->Instance == TIM2 && system_state)
 	{
 		// 100 ms passed
 		if (progress >= 100)
@@ -295,6 +343,8 @@ int main(void)
   HAL_NVIC_SetPriority(TIM2_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(TIM2_IRQn);
   HAL_TIM_Base_Start_IT(&htim2);
+  // Start first receive
+  HAL_UART_Receive_IT(&huart2, (uint8_t*)&uart_rx_buffer[0], 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
